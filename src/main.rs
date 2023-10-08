@@ -4,26 +4,21 @@ use std::path::Path;
 extern crate ini;
 use ini::Ini;
 use std::env;
+use std::error::Error;
 
-mod hqm_faceoff_practice;
-mod hqm_match;
+mod hqm_ranked;
+use crate::hqm_ranked::HQMRankedBehaviour;
 
-mod hqm_russian;
-mod hqm_shootout;
-mod hqm_warmup;
+use deadpool_postgres::{Pool, Manager};
+use tokio_postgres::NoTls;
 
-use crate::hqm_faceoff_practice::HQMFaceoffPracticeBehaviour;
-use crate::hqm_match::HQMMatchBehaviour;
-
-use crate::hqm_russian::HQMRussianBehaviour;
-use crate::hqm_shootout::HQMShootoutBehaviour;
-use crate::hqm_warmup::HQMPermanentWarmup;
 use ini::Properties;
 use migo_hqm_server::hqm_game::HQMPhysicsConfiguration;
-use migo_hqm_server::hqm_match_util::{
-    HQMIcingConfiguration, HQMMatchConfiguration, HQMOffsideConfiguration,
+use migo_hqm_server::hqm_ranked_util::{
+    HQMIcingConfiguration, HQMRankedConfiguration, RankedPickingMode, HQMOffsideConfiguration,
     HQMOffsideLineConfiguration, HQMTwoLinePassConfiguration,
 };
+
 use migo_hqm_server::hqm_server;
 use migo_hqm_server::hqm_server::{
     HQMServerConfiguration, HQMSpawnPoint, ReplayEnabled, ReplaySaving,
@@ -32,15 +27,11 @@ use tracing_appender;
 use tracing_subscriber;
 
 enum HQMServerMode {
-    Match,
-    PermanentWarmup,
-    Russian,
-    Shootout,
-    FaceoffPractice,
+    Ranked,
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
 
     let config_path = if args.len() > 1 {
@@ -85,13 +76,9 @@ async fn main() -> std::io::Result<()> {
             .unwrap();
         let mode = server_section
             .get("mode")
-            .map_or(HQMServerMode::Match, |x| match x {
-                "warmup" => HQMServerMode::PermanentWarmup,
-                "match" => HQMServerMode::Match,
-                "russian" => HQMServerMode::Russian,
-                "shootout" => HQMServerMode::Shootout,
-                "faceoff" => HQMServerMode::FaceoffPractice,
-                _ => HQMServerMode::Match,
+            .map_or(HQMServerMode::Ranked, |x| match x {
+                "ranked" => HQMServerMode::Ranked,
+                _ => HQMServerMode::Ranked,
             });
 
         let replays_enabled = match server_section.get("replays") {
@@ -134,6 +121,8 @@ async fn main() -> std::io::Result<()> {
 
         // Game
         let game_section = conf.section(Some("Game"));
+
+        let ranked_section = conf.section(Some("Ranked"));
 
         let limit_jump_speed = get_optional(game_section, "limit_jump_speed", false, |s| {
             s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("on")
@@ -212,7 +201,7 @@ async fn main() -> std::io::Result<()> {
         tracing_subscriber::fmt().with_writer(non_blocking).init();
 
         return match mode {
-            HQMServerMode::Match => {
+            _ => {
                 let periods =
                     get_optional(game_section, "periods", 3, |x| x.parse::<u32>().unwrap());
 
@@ -290,6 +279,17 @@ async fn main() -> std::io::Result<()> {
                         _ => HQMSpawnPoint::Center,
                     });
 
+                let picking_mode = get_optional(
+                    ranked_section,
+                    "picking_mode",
+                    RankedPickingMode::CaptainsPick,
+                    |x| match x {
+                        "captain" => RankedPickingMode::CaptainsPick,
+                        "server" => RankedPickingMode::ServerPick,
+                        _ => RankedPickingMode::CaptainsPick,
+                    },
+                );
+
                 let use_mph = get_optional(game_section, "use_mph", false, |s| {
                     s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("on")
                 });
@@ -298,7 +298,7 @@ async fn main() -> std::io::Result<()> {
                     s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("on")
                 });
 
-                let match_config = HQMMatchConfiguration {
+                let match_config = HQMRankedConfiguration {
                     time_period: rules_time_period,
                     time_warmup: rules_time_warmup,
                     time_break: rule_time_break,
@@ -315,72 +315,24 @@ async fn main() -> std::io::Result<()> {
                     physics_config,
                     blue_line_location,
                     periods,
+                    picking_mode,
+                    notification: true,
+                    team_max: server_team_max,
                 };
 
-                hqm_server::run_server(
-                    server_port,
-                    server_public,
-                    config,
-                    HQMMatchBehaviour::new(match_config, server_team_max, spawn_point),
-                )
-                .await
-            }
-            HQMServerMode::PermanentWarmup => {
-                let warmup_pucks = get_optional(game_section, "warmup_pucks", 1, |x| {
-                    x.parse::<usize>().unwrap()
-                });
+                let pg_config: tokio_postgres::Config = server_section.get("db").unwrap().parse()?;
+                let manager = Manager::from_config(pg_config, NoTls, Default::default());
+                let pool = Pool::builder(manager).max_size(4).build()?;
 
-                let spawn_point =
-                    get_optional(game_section, "spawn", HQMSpawnPoint::Center, |x| match x {
-                        "bench" => HQMSpawnPoint::Bench,
-                        _ => HQMSpawnPoint::Center,
-                    });
-
-                hqm_server::run_server(
+                let _ = hqm_server::run_server(
                     server_port,
                     server_public,
                     config,
-                    HQMPermanentWarmup::new(physics_config, warmup_pucks, spawn_point),
+                    HQMRankedBehaviour::new(match_config, server_team_max, spawn_point, pool),
                 )
-                .await
-            }
-            HQMServerMode::Russian => {
-                let attempts =
-                    get_optional(game_section, "attempts", 10, |x| x.parse::<u32>().unwrap());
-
-                hqm_server::run_server(
-                    server_port,
-                    server_public,
-                    config,
-                    HQMRussianBehaviour::new(
-                        attempts,
-                        server_team_max,
-                        physics_config,
-                        blue_line_location,
-                    ),
-                )
-                .await
-            }
-            HQMServerMode::Shootout => {
-                let attempts =
-                    get_optional(game_section, "attempts", 5, |x| x.parse::<u32>().unwrap());
-
-                hqm_server::run_server(
-                    server_port,
-                    server_public,
-                    config,
-                    HQMShootoutBehaviour::new(attempts, physics_config),
-                )
-                .await
-            }
-            HQMServerMode::FaceoffPractice => {
-                hqm_server::run_server(
-                    server_port,
-                    server_public,
-                    config,
-                    HQMFaceoffPracticeBehaviour::new(physics_config),
-                )
-                .await
+                .await;
+                
+                Ok(())
             }
         };
     } else {

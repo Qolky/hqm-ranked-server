@@ -10,7 +10,7 @@ nalgebra = "0.32"
 tokio = { version = "1.29", features = ["net", "time", "macros", "rt-multi-thread", "sync", "fs", "parking_lot"] }
 rust-ini = "0.18" # INI For configuration
 bytes = "1.4"
-reqwest = { version = "0.11", default_features=false, features = ["multipart"] }
+reqwest = { version = "0.11", default_features=false, features = ["multipart", "json"] }
 tracing = "0.1.37"
 tracing-subscriber = {version="0.3", features = ["parking_lot"]}
 tracing-appender = "0.2"
@@ -18,6 +18,16 @@ chrono = "0.4"
 uuid = { version = "1.4", features = ["v4"] }
 smallvec = { version = "1.11", features = ["union", "const_generics"]}
 systemctl = "0.1.9"
+deadpool-postgres = "0.10.1"
+tokio-postgres = "0.7.5"
+crossbeam-channel = "0.5.2"
+md5 = "0.7.0"
+anyhow = "1"
+itertools = "0.10.3"
+serde_json = "1.0"
+serde = "1.0.137"
+rand = "0.8"
+bbt = "0.2.0"
 
 [profile.dev]
 opt-level = 2
