@@ -2,20 +2,20 @@ use crate::hqm_game::{
     HQMGame, HQMGameWorld, HQMObjectIndex, HQMPhysicsConfiguration, HQMPuck, HQMRinkFaceoffSpot,
     HQMRinkLine, HQMRinkSide, HQMRulesState, HQMTeam,
 };
+use crate::hqm_server::HQMSpawnPoint;
 use crate::hqm_server::{HQMServer, HQMServerPlayer, HQMServerPlayerIndex, HQMServerPlayerList};
 use crate::hqm_simulate::HQMSimulationEvent;
+use bbt::{Rater, Rating};
 use deadpool_postgres::Pool;
+use itertools::Itertools;
 use nalgebra::{Point3, Rotation3, Vector3};
+use rand::prelude::SliceRandom;
+use reqwest;
+use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use smallvec::SmallVec;
-use itertools::Itertools;
-use crate::hqm_server::HQMSpawnPoint;
-use tracing::info;
 use std::f32::consts::FRAC_PI_2;
-use reqwest;
-use rand::prelude::SliceRandom;
-use bbt::{Rater, Rating};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct RHQMQueuePlayer {
@@ -276,7 +276,7 @@ impl HQMRanked {
 
         Self {
             config,
-            paused: false,
+            paused: true,
             pause_timer: 0,
             is_pause_goal: false,
             next_faceoff_spot: HQMRinkFaceoffSpot::Center,
@@ -1329,18 +1329,18 @@ impl HQMRanked {
         if self.config.notification == true && players_count >= 5 {
             tokio::spawn(async move {
                 let baseurl = "https://api.hqmranked.ru:5000/api/telegram/notif".to_string();
-    
+
                 let client = reqwest::Client::new();
                 let mut map = HashMap::new();
-                let text = format!("{} [{} players]\n{}", server_name, players_count, players.join("\n"));
+                let text = format!(
+                    "{} [{} players]\n{}",
+                    server_name,
+                    players_count,
+                    players.join("\n")
+                );
                 map.insert("text", text);
-    
-                if let Err(err) = client
-                    .post(baseurl)
-                    .json(&map)
-                    .send()
-                    .await
-                {
+
+                if let Err(err) = client.post(baseurl).json(&map).send().await {
                     eprintln!("Error sending notification: {:?}", err);
                 }
             });
@@ -1366,11 +1366,7 @@ impl HQMRanked {
                 let player_id_slice = &[&id];
                 map.insert("playerID", player_id_slice);
 
-                let resr = clientr
-                    .post(baseurl)
-                    .json(&map)
-                    .send()
-                    .await?;
+                let resr = clientr.post(baseurl).json(&map).send().await?;
 
                 let resr_text = resr.text().await?;
                 let resr_int = resr_text.parse::<i32>().unwrap();
@@ -1382,14 +1378,14 @@ impl HQMRanked {
                 let point = client.query(point_sql, &[&id]).await?;
                 let win_rate_res = client.query(winrate_sql, &[&id]).await?;
                 let win_rate_res = win_rate_res.get(0);
-                    // let rating_res = client.query(rating_sql, &[&id]).await?;
+                // let rating_res = client.query(rating_sql, &[&id]).await?;
 
                 let point: i64 = point.get(0).map(|x| x.get(0)).unwrap_or(0);
                 let win_rate: f64 = win_rate_res.map(|x| x.get(0)).unwrap_or(0.0);
-                    // let mut rating: i32 = 0i32;
-                    // if rating_res.len() > 0 {
-                    //     rating = rating_res.get(0).map(|x| x.get(0)).unwrap_or(0);
-                    // }
+                // let mut rating: i32 = 0i32;
+                // if rating_res.len() > 0 {
+                //     rating = rating_res.get(0).map(|x| x.get(0)).unwrap_or(0);
+                // }
 
                 res.insert(id, (point, win_rate, resr_int));
             }
@@ -1492,6 +1488,8 @@ impl HQMRanked {
             } else {
                 let mut old_options = std::mem::replace(options, vec![]);
                 old_options.retain(|(_, _, id, _)| *id != player_id);
+                server.game.period = 0;
+                server.game.time = 2000;
                 self.status = State::CaptainsPicking {
                     time_left: 2000,
                     options: old_options,
@@ -1547,11 +1545,7 @@ impl HQMRanked {
             let player_name = best_remaining.player_name.clone();
             best_remaining.player_team = Some(current_team);
             if let Some(player_index) = best_remaining.player_index {
-                server.spawn_skater_at_spawnpoint(
-                    player_index,
-                    current_team,
-                    HQMSpawnPoint::Bench,
-                );
+                server.spawn_skater_at_spawnpoint(player_index, current_team, HQMSpawnPoint::Bench);
             }
             let msg = format!(
                 "[Server] Time ran out, {} has been picked for {}",
@@ -1978,19 +1972,11 @@ impl HQMRanked {
         }
         for player_index in red_real_player_want_to_join {
             red_count += 1;
-            server.spawn_skater_at_spawnpoint(
-                player_index,
-                HQMTeam::Red,
-                HQMSpawnPoint::Bench,
-            );
+            server.spawn_skater_at_spawnpoint(player_index, HQMTeam::Red, HQMSpawnPoint::Bench);
         }
         for player_index in blue_real_player_want_to_join {
             blue_count += 1;
-            server.spawn_skater_at_spawnpoint(
-                player_index,
-                HQMTeam::Blue,
-                HQMSpawnPoint::Bench,
-            );
+            server.spawn_skater_at_spawnpoint(player_index, HQMTeam::Blue, HQMSpawnPoint::Bench);
         }
         if red_count < red_actual_players {
             for player_index in red_standin_want_to_join
@@ -1998,11 +1984,7 @@ impl HQMRanked {
                 .take(red_actual_players - red_count)
             {
                 red_count += 1;
-                server.spawn_skater_at_spawnpoint(
-                    player_index,
-                    HQMTeam::Red,
-                    HQMSpawnPoint::Bench,
-                );
+                server.spawn_skater_at_spawnpoint(player_index, HQMTeam::Red, HQMSpawnPoint::Bench);
             }
         } else if red_count > red_actual_players {
             for player_index in red_standins
@@ -2323,11 +2305,7 @@ impl HQMRanked {
             let mut map = HashMap::new();
             map.insert("game", resmax);
 
-            let res = client
-                .post(baseurl)
-                .json(&map)
-                .send() 
-                .await;
+            let res = client.post(baseurl).json(&map).send().await;
 
             Ok::<_, anyhow::Error>(())
         });
@@ -2474,6 +2452,7 @@ impl HQMRanked {
                         }
                     }
                     if successful {
+                        self.paused = false;
                         self.force_players_off_ice_by_system(server);
                         server.game.time = 2000;
                         self.rhqm_game.game_players = new_players;
