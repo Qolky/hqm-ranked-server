@@ -481,7 +481,13 @@ impl HQMRanked {
                                 let diff = touch.last_time.saturating_sub(goal_scorer_first_touch);
 
                                 if diff <= 1000 {
-                                    assist_index = Some(touch.player_index)
+                                    assist_index = Some(touch.player_index);
+
+                                    let assist_rhqm_player = self.rhqm_game.get_player_by_index_mut(touch.player_index);
+
+                                    if let Some(assist_rhqm_player) = assist_rhqm_player {
+                                        assist_rhqm_player.assists += 1;
+                                    }
                                 }
                                 break;
                             }
