@@ -1111,7 +1111,7 @@ impl HQMRanked {
         };
         self.puck_touches.clear();
         self.rhqm_game = RHQMGame::new();
-
+        self.paused = true;
         self.pause_timer = 0;
         self.next_faceoff_spot = HQMRinkFaceoffSpot::Center;
         self.icing_status = HQMIcingStatus::No;
